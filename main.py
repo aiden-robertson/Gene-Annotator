@@ -2,16 +2,12 @@
 import math
 import os
 import sqlite3
-from asyncore import file_dispatcher
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Genome information & dataset location
-genome = "saccharomyces_cerevisiae-genome"
+# Genome information
 bacterial = False
-
-path = os.path.join("Genomes", f"{genome}.db")
 
 codon_table = { # Copied from chatgpt
     "TTT":"Phe", "TTC":"Phe", "TTA":"Leu", "TTG":"Leu",
@@ -32,13 +28,6 @@ codon_table = { # Copied from chatgpt
     "GGT":"Gly", "GGC":"Gly", "GGA":"Gly", "GGG":"Gly"
 }
 
-connection = sqlite3.connect(path)
-cursor = connection.cursor()
-
-# Gets table in dataset
-cursor.execute("SELECT chromosome_number FROM genome")
-tables = cursor.fetchall()
-
 # Checks
 
 def get_genes(bases):
@@ -49,13 +38,13 @@ def get_genes(bases):
     # Seperates into three reading frames
     for frame in range(3):
         # Loops through each position in each reading frame
-        for pos in range(frame, length - 2, 3):
+        for pos in range(frame, len(bases) - 2, 3):
             codon = ''.join(bases[pos:pos + 3])
 
             # Checks for start codon
             if codon == "ATG":
                 # Looks for stop codon
-                for stop in range(pos + 3, length - 2, 3):
+                for stop in range(pos + 3, len(bases) - 2, 3):
                     stop_codon = ''.join(bases[stop:stop + 3])
 
                     if stop_codon in stops:
@@ -152,20 +141,39 @@ def codon_bias_check(potential_genes, bases, confidence_factor_positive, confide
 
     return confidence
 
-def check_genes(potential_genes, bases, threshold):
+def kozak(potential_genes, bases, confidence_factor_positive, confidence_factor_negative):
     confidence = [0 for i in range(len(potential_genes))]
 
+    # (gcc)gccRccATGG
+    for i, (start, stop) in enumerate(potential_genes):
+        inst_seq = ''.join(bases[start-9:start+1])
+
+        if inst_seq[-1] == "G":
+            confidence[i] += confidence_factor_positive
+        else:
+            confidence[i] -= confidence_factor_negative
+
+        if inst_seq[6] == "G" or inst_seq[6] == "A":
+            confidence[i] += confidence_factor_positive
+        else:
+            confidence[i] -= confidence_factor_negative
+
+        if inst_seq[4:] == "GCCACCATGG":
+            confidence[i] += confidence_factor_positive*2 # Exact kozak sequence
+
+    return confidence
+
+def check_genes(potential_genes, bases, bacterial, threshold):
     potential_genes = remove_nested(potential_genes)
 
     shine_dalgarno_confidence = shine_dalgarno(potential_genes, bases, 0.3) if bacterial else [0 for i in range(len(potential_genes))]
     gc_confidence = gc_comparison(potential_genes, bases, .3, .48)
     codon_bias_confidence = codon_bias_check(potential_genes, bases, .3, .1)
+    kozak_confidence = kozak(potential_genes, bases, .3, .1)
 
-    confidence = [confidence[i] + (shine_dalgarno_confidence[i] + gc_confidence[i] + codon_bias_confidence[i]) for i in range(len(potential_genes))]
+    confidence = [(shine_dalgarno_confidence[i] + gc_confidence[i] + codon_bias_confidence[i] + kozak_confidence[i]) for i in range(len(potential_genes))]
 
     # Removes any genes with too low a confidence
-    threshold = .3
-
     filtered_genes = []
     filtered_confidence = []
 
@@ -215,8 +223,35 @@ def graph_genes(lines, alphas, y_scale):
             "  Confidence = " + str(alphas[i]) if alphas[i] > 0 else ""))
 
 if __name__ == "__main__":
+
     # Primary loop for accessing data
     while True:
+        # Genome choice
+        options = os.listdir("Genomes")
+
+        options = [option for option in options if ".db" in option]
+        options = [option.replace("-genome.db", "") for option in options]
+        options = [option.replace("_", " ") for option in options]
+
+        print("Please choose a genome to access:")
+        for i, option in enumerate(options):
+            print(f"{option} [{i + 1}]")
+
+        try:
+            genome = options[int(input("Enter index of chosen genome: ")) - 1].replace(" ", "_") + "-genome.db"
+        except ValueError or IndexError or KeyError:
+            print("Please enter valid index.")
+            continue
+
+        path = os.path.join("Genomes", genome)
+
+        connection = sqlite3.connect(path)
+        cursor = connection.cursor()
+
+        # Gets table in dataset
+        cursor.execute("SELECT chromosome_number FROM genome")
+        tables = cursor.fetchall()
+
         # Chromosome choice
         access = input(f"Enter chromosome index to access(1 - {len(tables)}): ") if len(tables) > 1 else 1
 
@@ -240,17 +275,29 @@ if __name__ == "__main__":
             print(f"chromosome: {access}")
             print(f"bases: {length}")
 
-            graph_line(length, genome, access)
+            graph_line(length, genome.replace("_", " ").removesuffix("-genome.db"), access)
+
+            # Gets reverse complement for bases
+            reverse_complement = ""
+            for i in range(length-1, -1, -1):
+                if bases[i] == "T":
+                    reverse_complement += "A"
+                elif bases[i] == "A":
+                    reverse_complement += "T"
+                elif bases[i] == "C":
+                    reverse_complement += "G"
+                elif bases[i] == "G":
+                    reverse_complement += "C"
 
             potential_genes = get_genes(bases)
-            reverse_potential_genes = get_genes(bases[::-1])
+            reverse_potential_genes = get_genes(reverse_complement)
 
             # Gene checks
-            potential_genes, confidence = check_genes(potential_genes, bases, .3)
-            reverse_potential_genes, reverse_confidence = check_genes(reverse_potential_genes, bases[::-1], .3)
+            potential_genes, confidence = check_genes(potential_genes, bases, .3, .5)
+            reverse_potential_genes, reverse_confidence = check_genes(reverse_potential_genes, reverse_complement, .3, .5)
 
             # Makes reversed genes start/stop accurate
-            reverse_potential_genes = [(length - starts, length - stops) for starts, stops in reverse_potential_genes]
+            reverse_potential_genes = [(length - stop, length - start)for start, stop in reverse_potential_genes]
 
             # Plots gene map
             graph_genes(potential_genes, confidence, 1)
@@ -276,7 +323,7 @@ if __name__ == "__main__":
 
             plt.show()
 
-            print(confidence)
+            print(f"{len(potential_genes) + len(reverse_potential_genes)} genes mapped.")
 
             if input("Press ENTER to exit, or any key then enter to view other chromosome\n") == '':
                 break
