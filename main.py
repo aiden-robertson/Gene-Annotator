@@ -4,10 +4,12 @@ import os
 import sqlite3
 
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Cursor
 import numpy as np
 
 # Genome information
-bacterial = True
+threshold = 1.3
+minimum_gene_length = 20
 
 codon_table = { # Copied from chatgpt
     "TTT":"Phe", "TTC":"Phe", "TTA":"Leu", "TTG":"Leu",
@@ -44,59 +46,34 @@ def get_genes(bases):
 
             # Checks for start codon
             if codon in starts:
+                latest_stop = -1
+
                 # Looks for stop codon
                 for stop in range(pos + 3, len(bases) - 2, 3):
                     stop_codon = ''.join(bases[stop:stop + 3])
 
                     if stop_codon in stops:
-                        potential_genes.append((pos, stop + 3))
+                        latest_stop = stop
+                    elif stop_codon in starts and latest_stop != -1: # new codon is starting
                         break
 
+                if latest_stop != -1:
+                    potential_genes.append((pos, latest_stop+3))
+
     return potential_genes
-
-def remove_nested(potential_genes, confidence):
-    # Sorts gene list by length
-    potential_genes.sort(key=lambda x: x[1] - x[0], reverse=True)
-
-    filtered = []
-    filtered_confidence = []
-
-    # Looks through all the start and stops
-    for i, (start, stop) in enumerate(potential_genes):
-        contained = False  # Marks it as not contained by default
-        for fstart, fstop in filtered:
-
-            # Flags it if it is nested inside another gene
-            if start >= fstart and stop <= fstop:
-                contained = True
-                break
-
-        # Filters out any not nested genes
-        if not contained:
-            filtered.append((start, stop))
-            filtered_confidence.append(confidence[i])
-        elif confidence[i] > .5:
-            filtered.append((start, stop))
-            filtered_confidence.append(confidence[i])
-
-    potential_genes = filtered
-
-    return potential_genes, confidence
 
 def shine_dalgarno(potential_genes, bases, confidence_factor):
     confidence = [0 for i in range(len(potential_genes))]
 
     # Partials
     partials = {"GAGG", "GGAGGT", "AGGA", "GGAG", "GAGGT", "TAAGG"}
+    for i, (start, stop) in enumerate(potential_genes):
+        upstream = ''.join(bases[max(0, start - 10):start])
 
-    if bacterial:
-        for i, (start, stop) in enumerate(potential_genes):
-            upstream = ''.join(bases[max(0, start - 10):start])
-
-            if "AGGAGG" in upstream:
-                confidence[i] += confidence_factor
-            elif True in [partial in upstream for partial in partials]: # Checks for partials
-                confidence[i] += confidence_factor
+        if "AGGAGG" in upstream:
+            confidence[i] += confidence_factor
+        elif True in [partial in upstream for partial in partials]: # Checks for partials
+            confidence[i] += confidence_factor
 
     return confidence
 
@@ -110,6 +87,8 @@ def gc_comparison(potential_genes, bases, confidence_factor_positive, confidence
 
         # Genes generally have more GC contents
         if (gc_goal - .1) < gc < (gc_goal + .1):
+            confidence[i] += confidence_factor_positive
+        elif stop - start > 1000 and (gc_goal - .2) < gc < (gc_goal + .2): # More lenient on larger genes
             confidence[i] += confidence_factor_positive
 
     # Checks for genes where 3rd reading frame has most gc content
@@ -126,11 +105,9 @@ def gc_comparison(potential_genes, bases, confidence_factor_positive, confidence
             if bases[codon+2] == "G" or bases[codon+2] == "C":
                 gc3 += 1
 
-        if gc1 < gc3 and gc2 < gc3:
+        periodicity_score = gc3 - (gc1 + gc2) / 2
+        if periodicity_score > 0:
             confidence[i] += confidence_factor_positive
-        else:
-            confidence[i] -= confidence_factor_negative
-
     return confidence
 
 def codon_bias_check(potential_genes, bases, confidence_factor_positive, confidence_factor_negative):
@@ -162,31 +139,7 @@ def codon_bias_check(potential_genes, bases, confidence_factor_positive, confide
                 codon_count += 1
 
         if codon_count > 0:
-            confidence[i] += score / codon_count
-
-    return confidence
-
-def kozak(potential_genes, bases, confidence_factor_positive, confidence_factor_negative):
-    confidence = [0 for i in range(len(potential_genes))]
-
-    # (gcc)gccRccATGG
-    for i, (start, stop) in enumerate(potential_genes):
-        if start < 10: continue # Not likely; but just to be safe
-
-        inst_seq = ''.join(bases[start-9:start+1])
-
-        if inst_seq[-1] == "G":
-            confidence[i] += confidence_factor_positive
-        else:
-            confidence[i] -= confidence_factor_negative
-
-        if inst_seq[6] == "G" or inst_seq[6] == "A":
-            confidence[i] += confidence_factor_positive
-        else:
-            confidence[i] -= confidence_factor_negative
-
-        if inst_seq[4:] == "GCCACCATGG":
-            confidence[i] += confidence_factor_positive*2 # Exact kozak sequence
+            confidence[i] += score * confidence_factor_positive / codon_count
 
     return confidence
 
@@ -221,25 +174,48 @@ def stop_distribution(potential_genes, bases, confidence_factor_negative):
 
     return confidence
 
-def check_genes(potential_genes, bases, bacterial, threshold):
-    shine_dalgarno_confidence = shine_dalgarno(potential_genes, bases, 0.3) if bacterial else [0 for i in
-                                                                                               range(len(potential_genes))]
-    gc_confidence = gc_comparison(potential_genes, bases, .3, .1, .48)
-    codon_bias_confidence = codon_bias_check(potential_genes, bases, .3, .1)
-    kozak_confidence = kozak(potential_genes, bases, .3, .1)
-    stop_distribution_confidence = stop_distribution(potential_genes, bases, .1)
+# TODO: ALTERNATIVE FRAME STOP DENSITY
 
-    confidence = [(shine_dalgarno_confidence[i] + gc_confidence[i] + codon_bias_confidence[i] + kozak_confidence[i] + stop_distribution_confidence[i])
+# TODO: CODING PERIODICITY (fourier signal)
+
+# TODO: CODON ADAPTATION INDEX
+
+# TODO: START CODON CONTEXT
+
+# TODO: AMINO ACID ENTROPY CHECK
+
+# TODO: LENGTH-SCALED LIKELIHOOD (exponentially longer orfs are punished; less likely to exist)
+
+def check_genes(potential_genes, bases, threshold):
+    shine_dalgarno_confidence = shine_dalgarno(potential_genes, bases, 0.3)
+    gc_confidence = gc_comparison(potential_genes, bases, .3, .1, .48)
+    codon_bias_confidence = codon_bias_check(potential_genes, bases, 3, .3)
+    stop_distribution_confidence = stop_distribution(potential_genes, bases, .05)
+
+    #print(f"gene {potential_genes[1737]} \ngc: {gc_confidence[1737]}, codon bias: {codon_bias_confidence[1737]}, kozak: {kozak_confidence[1737]}, stop distribution: {stop_distribution_confidence[1737]}")
+
+    confidence = [(shine_dalgarno_confidence[i] + gc_confidence[i] + codon_bias_confidence[i] + stop_distribution_confidence[i])
                   for i in range(len(potential_genes))]
 
-    potential_genes, confidence = remove_nested(potential_genes, confidence)
+    # Used to track certian genes
+    debug = True
+    gene = (7201, 7600)
+    if debug:
+        try:
+            i = potential_genes.index(gene)
+            print(f"Gene: {gene}")
+            print(f"Confidence: {confidence[i]}")
+            print(
+                f"GC distribution: {gc_confidence[i]}; codon bias: {codon_bias_confidence[i]}; stop usage: {stop_distribution_confidence[i]}")
+        except ValueError:
+            print(f"Gene {gene} not found")
 
     # Filters out super small genes
     filtered_genes = []
     filtered_confidence = []
 
     for i, (start, stop) in enumerate(potential_genes):
-        if stop - start < 20:
+        if stop - start < minimum_gene_length:
             pass
         else:
             if stop - start < len(bases) / 1000: # If all genes failed this requernment only ~.1% of the genome would be genes; 10x smaller than the average percent in eukaryotes
@@ -250,6 +226,12 @@ def check_genes(potential_genes, bases, bacterial, threshold):
 
     potential_genes = filtered_genes
     confidence = filtered_confidence
+
+    for i, (start, stop) in enumerate(potential_genes):
+        if stop - start > 1000: # Often a bias against larger genes; helps combat this
+            confidence[i] += .4
+
+    #potential_genes, confidence = remove_nested(potential_genes, confidence)
 
     # Removes any genes with too low a confidence
     filtered_genes = []
@@ -332,6 +314,10 @@ if __name__ == "__main__":
 
         # Chromosome choice
         access = input(f"Enter chromosome index to access(1 - {len(tables)}): ") if len(tables) > 1 else 1
+        try:
+            threshold = float(input(f"Enter accuracy threshold: "))
+        except ValueError:
+            pass
 
         # Checks for valid choice
         passed = True
@@ -357,16 +343,13 @@ if __name__ == "__main__":
 
             # Gets reverse complement for bases
             complement = {"A": "T", "T": "A", "C": "G", "G": "C"}
-            reverse_complement = "".join([complement[b] for b in reversed(bases) if b is not "N"])
+            reverse_complement = "".join([complement[b] if b != "N" else "N" for b in reversed(bases)])
 
             potential_genes = get_genes(bases)
             reverse_potential_genes = get_genes(reverse_complement)
 
-            # Gene checks
-            threshold = 1.2
-
-            potential_genes, confidence = check_genes(potential_genes, bases, bacterial, threshold)
-            reverse_potential_genes, reverse_confidence = check_genes(reverse_potential_genes, reverse_complement, bacterial, threshold)
+            potential_genes, confidence = check_genes(potential_genes, bases, threshold)
+            reverse_potential_genes, reverse_confidence = check_genes(reverse_potential_genes, reverse_complement, threshold)
 
             # Makes reversed genes start/stop accurate
             reverse_potential_genes = [(length - stop, length - start)for start, stop in reverse_potential_genes]
@@ -391,12 +374,14 @@ if __name__ == "__main__":
             # Plots TATA boxes
             #for i in range(len(bases)-3):
             #    if bases[i:i+6] == "TATAAA":
-            #        plt.scatter(i, 0, color="green", s=10)
+            #        plt.scatter(i, 0, color="green", s=10
 
             plt.show()
+
+            potential_genes.sort(key=lambda x: x[0])
 
             print(f"{len(potential_genes) + len(reverse_potential_genes)} genes mapped.")
             print(f"Genes(start, stop): forward {potential_genes} reverse {reverse_potential_genes}")
 
-            if input("Press ENTER to exit, or any key then enter to view other chromosome\n") == '':
+            if input("Press ENTER to exit, or any key then enter to view other chromosome\n") == "":
                 break
