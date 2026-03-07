@@ -8,8 +8,8 @@ from matplotlib.widgets import Cursor
 import numpy as np
 
 # Genome information
-threshold = 1.3
-minimum_gene_length = 20
+threshold = 1.4
+minimum_gene_length = 100
 
 codon_table = { # Copied from chatgpt
     "TTT":"Phe", "TTC":"Phe", "TTA":"Leu", "TTG":"Leu",
@@ -53,12 +53,8 @@ def get_genes(bases):
                     stop_codon = ''.join(bases[stop:stop + 3])
 
                     if stop_codon in stops:
-                        latest_stop = stop
-                    elif stop_codon in starts and latest_stop != -1: # new codon is starting
+                        potential_genes.append((pos, stop+3))
                         break
-
-                if latest_stop != -1:
-                    potential_genes.append((pos, latest_stop+3))
 
     return potential_genes
 
@@ -68,7 +64,7 @@ def shine_dalgarno(potential_genes, bases, confidence_factor):
     # Partials
     partials = {"GAGG", "GGAGGT", "AGGA", "GGAG", "GAGGT", "TAAGG"}
     for i, (start, stop) in enumerate(potential_genes):
-        upstream = ''.join(bases[max(0, start - 20):start-5])
+        upstream = ''.join(bases[max(0, start - 12):start-4])
 
         if "AGGAGG" in upstream:
             confidence[i] += confidence_factor
@@ -108,6 +104,8 @@ def gc_comparison(potential_genes, bases, confidence_factor_positive, confidence
         periodicity_score = gc3 - (gc1 + gc2) / 2
         if periodicity_score > 0:
             confidence[i] += confidence_factor_positive
+        else:
+            confidence[i] -= confidence_factor_negative
     return confidence
 
 def codon_bias_check(potential_genes, bases, confidence_factor_positive, confidence_factor_negative):
@@ -184,17 +182,18 @@ def alternate_stops(potential_genes, bases, confidence_factor_positive, confiden
         frame1 = 0
         frame2 = 0
 
-        for j in range(start, stop):
-            if bases[j:j+3] in stops:
-                if j % 3 == 1:
-                    frame1 += 1
-                elif j % 3 == 2:
-                    frame2 += 1
+        for j in range(start + 1, stop - 2, 3):  # frame +1
+            if bases[j:j + 3] in stops:
+                frame1 += 1
+
+        for j in range(start + 2, stop - 2, 3):  # frame +2
+            if bases[j:j + 3] in stops:
+                frame2 += 1
 
         frame1 = frame1 / (stop - start)
         frame2 = frame2 / (stop - start)
 
-        if frame1 > .2 or frame2 > .2:
+        if frame1 > .02 or frame2 > .02:
             confidence[i] += confidence_factor_positive * frame1 * frame2
         else:
             confidence[i] -= confidence_factor_negative
@@ -207,14 +206,31 @@ def alternate_stops(potential_genes, bases, confidence_factor_positive, confiden
 
 # TODO: AMINO ACID ENTROPY CHECK
 
+# TODO: FILTER STOPS -- Complete --
+def filter_stops(potential_genes, confidence):
+    best = {}
+
+    for gene, conf in zip(potential_genes, confidence):
+        start, stop = gene
+
+        if stop not in best or conf > best[stop][1]:
+            best[stop] = (gene, conf)
+
+    genes = [v[0] for v in best.values()]
+    confidences = [v[1] for v in best.values()]
+
+    return genes, confidences
+
+# TODO: START CODON PREFERENCE
+
 # TODO: LENGTH-SCALED LIKELIHOOD (exponentially longer orfs are punished; less likely to exist)
 
 def check_genes(potential_genes, bases, threshold):
-    shine_dalgarno_confidence = shine_dalgarno(potential_genes, bases, 0.3)
-    gc_confidence = gc_comparison(potential_genes, bases, .3, .1, .48)
-    codon_bias_confidence = codon_bias_check(potential_genes, bases, 3, .3)
+    shine_dalgarno_confidence = shine_dalgarno(potential_genes, bases, 1)
+    gc_confidence = gc_comparison(potential_genes, bases, .3, .3, .48)
+    codon_bias_confidence = codon_bias_check(potential_genes, bases, 10, 3)
     stop_distribution_confidence = stop_distribution(potential_genes, bases, .05)
-    alternate_stops_confidence = alternate_stops(potential_genes, bases, .4, .2)
+    alternate_stops_confidence = alternate_stops(potential_genes, bases, 300, .2)
 
     #print(f"gene {potential_genes[1737]} \ngc: {gc_confidence[1737]}, codon bias: {codon_bias_confidence[1737]}, kozak: {kozak_confidence[1737]}, stop distribution: {stop_distribution_confidence[1737]}")
 
@@ -230,7 +246,8 @@ def check_genes(potential_genes, bases, threshold):
             print(f"Gene: {gene}")
             print(f"Confidence: {confidence[i]}")
             print(
-                f"GC distribution: {gc_confidence[i]}; codon bias: {codon_bias_confidence[i]}; stop usage: {stop_distribution_confidence[i]}")
+                f"Shine Dalgarno: {shine_dalgarno_confidence[i]}; GC distribution: {gc_confidence[i]}; codon bias: {codon_bias_confidence[i]}; stop usage: {stop_distribution_confidence[i]}; "
+                f"alternate stops: {alternate_stops_confidence[i]}")
         except ValueError:
             print(f"Gene {gene} not found")
 
@@ -270,6 +287,8 @@ def check_genes(potential_genes, bases, threshold):
 
     potential_genes = filtered_genes
     confidence = filtered_confidence
+
+    potential_genes, confidence = filter_stops(potential_genes, confidence)
 
     return potential_genes, confidence
 
@@ -446,7 +465,7 @@ if __name__ == "__main__":
             #    if bases[i:i+6] == "TATAAA":
             #        plt.scatter(i, 0, color="green", s=10
 
-            plt.show()
+            plt.show(block=False)
 
             potential_genes.sort(key=lambda x: x[0])
 
