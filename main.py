@@ -493,20 +493,22 @@ if __name__ == "__main__":
 
         try:
             choice = int(input("Enter index of chosen genome: "))
-            if choice != 0: genome = options[choice - 1].replace(" ", "_") + "-genome.db"
+            if choice != 0:
+                genome = options[choice - 1].replace(" ", "_") + "-genome.db"
             else:
                 bases = quick_scan()
                 do_quick_scan = True
-
-                try:
-                    threshold = float(input(f"Enter accuracy threshold: "))
-                except ValueError:
-                    pass
-
-
-        except ValueError or IndexError or KeyError:
+        except ValueError:
+            print("Please enter valid integer.")
+            continue
+        except IndexError:
             print("Please enter valid index.")
             continue
+
+        try:
+            threshold = float(input(f"Enter accuracy threshold: "))
+        except ValueError:
+            pass
 
         if not do_quick_scan:
             path = os.path.join("Genomes", genome)
@@ -520,10 +522,6 @@ if __name__ == "__main__":
 
             # Chromosome choice
             access = input(f"Enter chromosome index to access(1 - {len(tables)}): ") if len(tables) > 1 else 1
-            try:
-                threshold = float(input(f"Enter accuracy threshold: "))
-            except ValueError:
-                pass
 
             # Checks for valid choice
             passed = True
