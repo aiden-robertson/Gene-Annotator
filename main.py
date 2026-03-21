@@ -8,7 +8,7 @@ from matplotlib.widgets import Cursor
 import numpy as np
 
 # Genome information
-threshold = 4
+threshold = 7
 minimum_gene_length = 150
 
 codon_table = { # Copied from ChatGPT
@@ -48,8 +48,11 @@ def get_genes(bases):
                 stop_pos = pos + 3
                 while stop_pos < len(bases) - 2:
                     stop_codon = bases[stop_pos:stop_pos+3]
+
                     if stop_codon in stops:
                         potential_genes.append((pos, stop_pos+3))
+                        break
+                    elif "N" in stop_codon: # Gene overlaps in unmapped area
                         break
                     stop_pos += 3
                 pos += 3  # move to next codon in this frame
@@ -149,7 +152,7 @@ def codon_bias_check(potential_genes, bases, confidence_factor_positive, confide
         if codon_count > 0:
             confidence[i] += score * confidence_factor_positive / codon_count + (stop - start) / 1000
         else:
-            confidence[i] -= confidence_factor_negative;
+            confidence[i] -= confidence_factor_negative
 
     return confidence
 
@@ -447,10 +450,10 @@ def graph_genes(lines, alphas, y_scale):
             "  Confidence = " + str(alphas[i]) if alphas[i] > 0 else ""))
         print(f"Gene mapped from"f" {start} to {stop}")
 
-# Other
+# Database
 
 def quick_scan(): # Taken from setup_data.py
-    print(f'\nPlease paste bases in chromosome {i + 1}.')
+    print(f'\nPlease paste bases.')
     print("Press ENTER on empty line when complete.\n")
 
     # Loops through all lines on the pasted dataset
@@ -462,16 +465,28 @@ def quick_scan(): # Taken from setup_data.py
         lines.append(line)
 
     # Joins all lines together
-    chromosome = ''.join(lines)
+    bases = ''.join(lines)
 
     # Removes all invalid characters
-    chromosome = ''.join(c.upper() for c in chromosome if c.lower() in {'a', 't', 'c', 'g', 'n'})
+    bases = ''.join(c.upper() for c in bases if c.lower() in {'a', 't', 'c', 'g', 'n'})
 
-    return chromosome
+    return bases
+
+def get_bases(genome):
+    path = os.path.join("Genomes", genome)
+
+    connection = sqlite3.connect(path)
+    cursor = connection.cursor()
+
+    # Gets table in dataset
+    cursor.execute("SELECT base_sequence FROM genome")
+
+    # Gets chromosome base sequence
+    bases = cursor.fetchall()[0][0]
+
+    return bases
 
 if __name__ == "__main__":
-
-    passed = True
 
     # Primary loop for accessing data
     while True:
@@ -487,17 +502,17 @@ if __name__ == "__main__":
         for i, option in enumerate(options):
             print(f"{option} [{i + 1}]")
 
-        do_quick_scan = False
-
         bases = ""
+        genome = ""
 
         try:
             choice = int(input("Enter index of chosen genome: "))
             if choice != 0:
                 genome = options[choice - 1].replace(" ", "_") + "-genome.db"
+                bases = get_bases(genome)
             else:
+                genome = "Quick Scan"
                 bases = quick_scan()
-                do_quick_scan = True
         except ValueError:
             print("Please enter valid integer.")
             continue
@@ -508,71 +523,38 @@ if __name__ == "__main__":
         try:
             threshold = float(input(f"Enter accuracy threshold: "))
         except ValueError:
-            pass
+            pass # Already have a default; doesn't matter as much
 
-        if not do_quick_scan:
-            path = os.path.join("Genomes", genome)
+        # Chromosome info
+        length = len(bases)
+        print(f"bases: {length}")
 
-            connection = sqlite3.connect(path)
-            cursor = connection.cursor()
+        graph_line(length, ''.join([genome.replace("_", " ").removesuffix("-genome.db")]))
 
-            # Gets table in dataset
-            cursor.execute("SELECT chromosome_number FROM genome")
-            tables = cursor.fetchall()
+        # Gets reverse complement for bases
+        complement = {"A": "T", "T": "A", "C": "G", "G": "C"}
+        reverse_complement = "".join([complement[b] if b != "N" else "N" for b in reversed(bases)])
 
-            # Chromosome choice
-            access = input(f"Enter chromosome index to access(1 - {len(tables)}): ") if len(tables) > 1 else 1
+        potential_genes = get_genes(bases)
+        reverse_potential_genes = get_genes(reverse_complement)
 
-            # Checks for valid choice
-            passed = True
-            try:
-                access = int(access)
-            except ValueError:
-                passed = False
+        potential_genes, confidence = check_genes(potential_genes, bases, threshold)
+        reverse_potential_genes, reverse_confidence = check_genes(reverse_potential_genes, reverse_complement, threshold)
 
-            if (access > len(tables) or access < 1) and passed:
-                print("Invalid index.")
+        # Makes reversed genes start/stop accurate
+        reverse_potential_genes = [(length - stop, length - start)for start, stop in reverse_potential_genes]
 
-            # Checks passed; gives info on chromosome
-        if passed:
-            if not do_quick_scan:
-                # Gets chromosome base sequence
-                chromosome = access
-                bases = cursor.execute("SELECT base_sequence FROM genome WHERE chromosome_number = ?",
-                                       (chromosome,)).fetchall()[0][0]
+        # Plots gene map
+        graph_genes(potential_genes, confidence, 1)
+        graph_genes(reverse_potential_genes, reverse_confidence, -1)
 
-            length = len(bases)
-            print(f"bases: {length}")
+        plt.show(block=False)
+        plt.pause(0.001) # Time for rendering to occur
 
-            if not do_quick_scan:
-                graph_line(length, ''.join([genome.replace("_", " ").removesuffix("-genome.db") + (f" Chromosome {access}" if len(tables) > 1 else "")]))
-            else:
-                graph_line(length, "Quick Scan")
+        potential_genes.sort(key=lambda x: x[0])
 
-            # Gets reverse complement for bases
-            complement = {"A": "T", "T": "A", "C": "G", "G": "C"}
-            reverse_complement = "".join([complement[b] if b != "N" else "N" for b in reversed(bases)])
+        print(f"{len(potential_genes) + len(reverse_potential_genes)} genes mapped.")
+        print(f"Genes(start, stop): forward {[(start+1, stop) for start, stop in potential_genes]} reverse {[(start+1, stop) for start, stop in reverse_potential_genes]}")
 
-            potential_genes = get_genes(bases)
-            reverse_potential_genes = get_genes(reverse_complement)
-
-            potential_genes, confidence = check_genes(potential_genes, bases, threshold)
-            reverse_potential_genes, reverse_confidence = check_genes(reverse_potential_genes, reverse_complement, threshold)
-
-            # Makes reversed genes start/stop accurate
-            reverse_potential_genes = [(length - stop, length - start)for start, stop in reverse_potential_genes]
-
-            # Plots gene map
-            graph_genes(potential_genes, confidence, 1)
-            graph_genes(reverse_potential_genes, reverse_confidence, -1)
-
-            plt.show(block=False)
-            plt.pause(0.001) # Time for rendering to occur
-
-            potential_genes.sort(key=lambda x: x[0])
-
-            print(f"{len(potential_genes) + len(reverse_potential_genes)} genes mapped.")
-            print(f"Genes(start, stop): forward {[(start+1, stop) for start, stop in potential_genes]} reverse {[(start+1, stop) for start, stop in reverse_potential_genes]}")
-
-            if input("Press ENTER to exit, or any key then enter to view other organisms\n") == "":
-                break
+        if input("Press ENTER to exit, or any key then enter to view other organisms\n") == "":
+            break
